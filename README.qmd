@@ -1,0 +1,178 @@
+---
+title: "README"
+author: "Tivan"
+format: gfm
+editor: visual
+editor_options: 
+  chunk_output_type: console
+---
+
+# Introduction
+
+This document walks through the basic steps involved in principal component analysis (PCA). It does so by using a specific example of property data in South Africa. 
+
+# Packages
+
+For this example I use the `factoextra` package for estimating the PCA and `tidyverse` for reading data and feature engineering. 
+
+```{r}
+#| eval: true
+#| message: false
+#| error: false
+
+library(factoextra)
+library(tidyverse)
+```
+
+
+# Data
+
+For this example I use rental data in South Africa. This is merely for illustrative purposes. 
+
+```{r}
+#| eval: true
+#| message: false
+#| error: false
+prop_data_raw <- read_delim("output/cop_property_data.csv", delim = "|")
+
+prop_data_raw
+```
+
+# Feature engineering
+
+Now that the data has been read in, we can alter some of the columns to make them more useful for our analysis. We extract the number of bedrooms from the `type` variable with provides a brief description of the type of property, extract the size of the property, and create a variable that indicates the deposit as a percentage of rent. 
+
+```{r}
+prop_data_feat <- prop_data_raw %>% 
+  # I want to keep only two provinces for illustrative purposes
+  filter(province %in% c("western-cape", "kwazulu-natal")) %>% 
+  mutate(
+    # grab the digits at the start of the type variable (these are usually the
+    # number of bedrooms)
+    bedrooms = gsub(".*([0-9]+).*", "\\1", type),
+    bedrooms = as.double(bedrooms),
+    # in cases where there is an NA, and the ad says studio or bachelors, make
+    # number of bedrooms 0.5
+    bedrooms = case_when(
+      !is.na(bedrooms) ~ bedrooms,
+      grepl("([Bb]achelor)|([Ss]tudio)", type) ~ 0.5,
+      T ~ NA_real_
+    ),
+    # extract the floor size and coerce to a double 
+    size = gsub("([0-9]+).*", "\\1", floor_size),
+    size = as.double(size),
+    # derive a variable for the ratio of the deposit to the price
+    deposit_prop = deposit/price
+  ) %>% 
+  # keep only the ones where we have a value for the number of bedrooms
+  filter(!is.na(bedrooms)) 
+
+prop_data_feat
+```
+
+
+# Outlier removal
+
+```{r}
+prop_data_outliers <- prop_data_feat %>% 
+  mutate(
+    # log price and deposit
+    across(
+      price:deposit,
+      ~log(.x)
+    ),
+    across(
+      price:deposit,
+      ~!between(
+        .x,
+        quantile(.x, 0.25) - (1.5 * IQR(.x)),
+        quantile(.x, 0.75) + (1.5 * IQR(.x))
+      ),
+      .names = "outlier_{.col}"
+    )
+  )
+
+prop_data_outliers
+
+```
+
+After using the IQR x1.5 method for outlier removal, we visualise the data to eyeball whether we are satisfied. 
+
+```{r}
+prop_data_outliers %>% 
+  arrange(bedrooms) %>% 
+  mutate(bedrooms = as_factor(bedrooms)) %>% 
+  ggplot() +
+  geom_jitter(
+    aes(x = bedrooms, y = price, color = outlier_price),
+    alpha = 0.8
+  ) +
+  geom_boxplot(
+    aes(x = bedrooms, y = price),
+    alpha = 0.5
+  ) +
+scale_y_continuous(trans = "log") +
+  theme_bw()
+```
+
+
+Now that we are happy with the outlier that have been identified, we can filter out those outliers and keep the columns that we need for estimation.
+
+```{r}
+prop_data <- prop_data_outliers %>% 
+filter(
+  !outlier_price,
+  !outlier_deposit,
+  bedrooms != 0, 
+  bedrooms <= 4
+) %>% 
+  select(
+    province,
+    city,
+    type,
+    price,
+    deposit,
+    days_ad_active,
+    bedrooms,
+    size
+  )
+
+prop_data
+```
+
+
+# Estimating the PCA
+
+```{r}
+# estimate the pca
+res.pca <- prop_data %>% 
+  select(where(is.numeric)) %>% 
+  prcomp(., scale = TRUE)
+
+res.pca
+
+# Scree plot
+fviz_eig(res.pca)
+
+res.ind <- get_pca_ind(res.pca)
+
+res.ind$coord %>% 
+  as_tibble()
+
+property_pca <- bind_cols(prop_data, res.ind$coord)
+
+property_pca %>% 
+  filter(city %in% c("durban", "cape-town")) %>%
+  ggplot(
+    aes(x = Dim.1, y = Dim.2, color = city)
+  ) +
+  geom_point(alpha = 0.6, size = 3) +
+  theme_bw()
+
+```
+
+
+
+
+
+
